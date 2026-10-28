@@ -1,12 +1,15 @@
+import EventSource
 import Foundation
 import Logging
 
-#if !os(Linux)
-    import EventSource
-#endif
-
 #if canImport(FoundationNetworking)
     import FoundationNetworking
+#endif
+
+#if os(Linux)
+    import AsyncHTTPClient
+    import NIOCore
+    import NIOFoundationCompat
 #endif
 
 // MARK: - Timeout Helpers
@@ -29,7 +32,8 @@ import Logging
 /// - Regular HTTP (`streaming=false`): Simple request/response pattern
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
-/// - Important: Server-Sent Events (SSE) functionality is not supported on Linux platforms.
+/// - Important: On Linux, SSE answers to POST requests are read through AsyncHTTPClient; the
+///   standalone GET event stream is not supported there.
 ///
 /// ## Example Usage
 ///
@@ -267,8 +271,8 @@ public actor HTTPClientTransport: Transport {
 
             do {
                 #if os(Linux)
-                    let (responseData, response) = try await session.data(for: request)
-                    try await processResponse(response: response, data: responseData)
+                    let (responseStream, response) = try await Self.bytes(for: request)
+                    try await processResponse(response: response, stream: responseStream)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
                     try await processResponse(response: response, stream: responseStream)
@@ -305,38 +309,57 @@ public actor HTTPClientTransport: Transport {
     }
 
     #if os(Linux)
-        private func processResponse(response: URLResponse, data: Data) async throws {
-            guard let httpResponse = response as? HTTPURLResponse else {
+        /// Sends a request through AsyncHTTPClient and returns its body as it arrives.
+        /// FoundationNetworking on Linux has no `URLSession.bytes(for:)` and hands over a body only
+        /// once the server closes it, so an SSE answer would wait for the whole stream and then
+        /// arrive unparsed.
+        private static func bytes(for request: URLRequest) async throws -> (
+            AsyncThrowingStream<UInt8, Swift.Error>, URLResponse
+        ) {
+            guard let url = request.url else {
+                throw MCPError.internalError("Invalid request URL")
+            }
+            var outgoing = HTTPClientRequest(url: url.absoluteString)
+            outgoing.method = .init(rawValue: request.httpMethod ?? "GET")
+            for (name, value) in request.allHTTPHeaderFields ?? [:] {
+                outgoing.headers.add(name: name, value: value)
+            }
+            if let body = request.httpBody {
+                outgoing.body = .bytes(ByteBuffer(data: body))
+            }
+            let response = try await HTTPClient.shared.execute(
+                outgoing, timeout: .milliseconds(Int64(request.timeoutInterval * 1000)))
+            var fields: [String: String] = [:]
+            for header in response.headers {
+                fields[header.name] = fields[header.name].map { "\($0), \(header.value)" } ?? header.value
+            }
+            guard
+                let http = HTTPURLResponse(
+                    url: url, statusCode: Int(response.status.code), httpVersion: "HTTP/1.1",
+                    headerFields: fields)
+            else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
-
-            let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
-
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
-                let wasSessionIDNil = (self.sessionID == nil)
-                self.sessionID = newSessionID
-                if wasSessionIDNil {
-                    triggerInitialSessionIDSignal()
+            let body = response.body
+            let bytes = AsyncThrowingStream<UInt8, Swift.Error> { continuation in
+                let reading = Task {
+                    do {
+                        for try await buffer in body {
+                            for byte in buffer.readableBytesView { continuation.yield(byte) }
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+                continuation.onTermination = { _ in reading.cancel() }
             }
-
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200..<300 = httpResponse.statusCode else { return }
-
-            if contentType.contains(ContentType.sse) {
-                logger.warning("SSE responses aren't fully supported on Linux")
-                messageContinuation.yield(data)
-            } else if contentType.contains(ContentType.json) {
-                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
-            } else {
-                logger.warning("Unexpected content type: \(contentType)")
-            }
+            return (bytes, http)
         }
-    #else
-        private func processResponse(response: URLResponse, stream: URLSession.AsyncBytes)
-            async throws
+    #endif
+
+        private func processResponse<Bytes: AsyncSequence>(response: URLResponse, stream: Bytes)
+            async throws where Bytes.Element == UInt8
         {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
@@ -375,7 +398,6 @@ public actor HTTPClientTransport: Transport {
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }
-    #endif
 
     private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
         switch response.statusCode {
@@ -640,9 +662,11 @@ public actor HTTPClientTransport: Transport {
             defer { self.activeGETSessionTask = nil }
             try await self.processSSE(stream)
         }
+    #endif
 
         @discardableResult
-        private func processSSE(_ stream: URLSession.AsyncBytes) async throws -> Bool {
+        private func processSSE<Bytes: AsyncSequence>(_ stream: Bytes) async throws -> Bool
+        where Bytes.Element == UInt8 {
             logger.debug("📥 Starting SSE event processing")
             var eventCount = 0
             var hadDataEvent = false
@@ -682,5 +706,4 @@ public actor HTTPClientTransport: Transport {
             logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])
             return hadDataEvent
         }
-    #endif
 }

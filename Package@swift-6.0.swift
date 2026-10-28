@@ -8,6 +8,7 @@ var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
+    .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
 ]
 
 // Target dependencies needed on all platforms
@@ -15,8 +16,10 @@ var targetDependencies: [Target.Dependency] = [
     .product(name: "SystemPackage", package: "swift-system"),
     .product(name: "Logging", package: "swift-log"),
     .product(
-        name: "EventSource", package: "eventsource",
-        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS])),
+        name: "EventSource", package: "eventsource"),
+    .product(
+        name: "AsyncHTTPClient", package: "async-http-client",
+        condition: .when(platforms: [.linux])),
 ]
 
 let package = Package(
