@@ -272,11 +272,11 @@ public actor HTTPClientTransport: Transport {
             do {
                 #if os(Linux)
                     let (responseStream, response) = try await Self.bytes(for: request)
-                    try await processResponse(response: response, stream: responseStream)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
-                    try await processResponse(response: response, stream: responseStream)
                 #endif
+                try await processResponse(
+                    response: response, stream: responseStream, answering: Self.requestID(in: data))
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
                 guard let authorizer else {
@@ -358,9 +358,9 @@ public actor HTTPClientTransport: Transport {
         }
     #endif
 
-        private func processResponse<Bytes: AsyncSequence>(response: URLResponse, stream: Bytes)
-            async throws where Bytes.Element == UInt8
-        {
+        private func processResponse<Bytes: AsyncSequence>(
+            response: URLResponse, stream: Bytes, answering requestID: ID?
+        ) async throws where Bytes.Element == UInt8 {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
@@ -381,7 +381,7 @@ public actor HTTPClientTransport: Transport {
 
             if contentType.contains(ContentType.sse) {
                 logger.trace("Received SSE response, processing in streaming task")
-                let hadData = try await self.processSSE(stream)
+                let hadData = try await self.processSSE(stream, answering: requestID)
 
                 if !hadData {
                     logger.debug("POST SSE stream closed without data, triggering GET reconnection")
@@ -664,8 +664,37 @@ public actor HTTPClientTransport: Transport {
         }
     #endif
 
+        /// The id of a JSON-RPC request, or nil for a notification or a response.
+        private static func requestID(in data: Data) -> ID? {
+            struct Request: Decodable {
+                let id: ID?
+                let method: String?
+            }
+            guard let request = try? JSONDecoder().decode(Request.self, from: data),
+                request.method != nil
+            else { return nil }
+            return request.id
+        }
+
+        /// Whether `data` is the response to request `id`.
+        private static func isResponse(_ data: Data, to id: ID) -> Bool {
+            struct Response: Decodable {
+                let id: ID?
+                let result: Value?
+                let error: Value?
+            }
+            guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
+                return false
+            }
+            return response.id == id && (response.result != nil || response.error != nil)
+        }
+
+        /// Yields each event's data to the client. A POST's stream ends at the response to the
+        /// request that opened it, so a server that keeps the stream open does not hold a
+        /// connection after the answer.
         @discardableResult
-        private func processSSE<Bytes: AsyncSequence>(_ stream: Bytes) async throws -> Bool
+        private func processSSE<Bytes: AsyncSequence>(_ stream: Bytes, answering requestID: ID? = nil)
+            async throws -> Bool
         where Bytes.Element == UInt8 {
             logger.debug("📥 Starting SSE event processing")
             var eventCount = 0
@@ -700,6 +729,7 @@ public actor HTTPClientTransport: Transport {
                 if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
                     hadDataEvent = true
                     messageContinuation.yield(data)
+                    if let requestID, Self.isResponse(data, to: requestID) { break }
                 }
             }
 
