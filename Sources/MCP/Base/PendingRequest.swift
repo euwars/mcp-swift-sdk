@@ -26,7 +26,7 @@ struct AnyPendingRequest: Sendable {
                         request.continuation.resume(returning: try JSONDecoder().decode(T.self, from: data))
                     } catch {
                         request.continuation.resume(
-                            throwing: MCPError.parseError("the answer does not read as \(T.self): \(error)"))
+                            throwing: MCPError.parseError("the answer does not read as \(T.self): \(Self.reason(error))"))
                     }
                 } else {
                     request.continuation.resume(throwing: TypeMismatchError())
@@ -34,6 +34,20 @@ struct AnyPendingRequest: Sendable {
             case .failure(let error):
                 request.continuation.resume(throwing: error)
             }
+        }
+    }
+
+    /// A decoding error in one short line: the field that is missing or wrong.
+    private static func reason(_ error: Swift.Error) -> String {
+        switch error {
+        case DecodingError.keyNotFound(let key, _):
+            return "\(key.stringValue) is missing"
+        case DecodingError.typeMismatch(_, let context), DecodingError.valueNotFound(_, let context),
+            DecodingError.dataCorrupted(let context):
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+            return path.isEmpty ? context.debugDescription : "\(path): \(context.debugDescription)"
+        default:
+            return "\(error)"
         }
     }
 

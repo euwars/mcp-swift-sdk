@@ -181,6 +181,8 @@ public actor Client {
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Requests cancelled before they were registered as pending
+    private var cancelledRequests: Set<ID> = []
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -443,6 +445,9 @@ public actor Client {
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
+        } else {
+            // Cancelled before `send` registered it: refused when it registers.
+            cancelledRequests.insert(requestID)
         }
 
         // Send cancellation notification to server
@@ -475,6 +480,10 @@ public actor Client {
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type  // Keep type for AnyPendingRequest internal logic
     ) {
+        if cancelledRequests.remove(id) != nil {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
         pendingRequests[id] = AnyPendingRequest(
             PendingRequest(continuation: continuation)
         )

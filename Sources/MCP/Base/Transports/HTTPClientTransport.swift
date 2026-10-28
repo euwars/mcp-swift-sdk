@@ -431,7 +431,7 @@ public actor HTTPClientTransport: Transport {
             )
 
         case 404:
-            if sessionID != nil {
+            if sessionID != nil || sessionExpired {
                 logger.warning("Session has expired")
                 sessionID = nil
                 sessionExpired = true
