@@ -181,7 +181,9 @@ public actor Client {
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
-    /// Requests cancelled before they were registered as pending
+    /// Requests `send` has made but not yet registered as pending
+    private var unregisteredRequests: Set<ID> = []
+    /// Requests among those cancelled before they were registered
     private var cancelledRequests: Set<ID> = []
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
@@ -297,6 +299,8 @@ public actor Client {
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
+        self.unregisteredRequests = []
+        self.cancelledRequests = []
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -397,16 +401,20 @@ public actor Client {
         }
 
         let requestData = try encoder.encode(request)
+        unregisteredRequests.insert(request.id)
 
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
-                    // Add the pending request before attempting to send
-                    self.addPendingRequest(
-                        id: request.id,
-                        continuation: continuation,
-                        type: M.Result.self
-                    )
+                    // Add the pending request before attempting to send; one cancelled before it
+                    // got here is never sent.
+                    guard
+                        self.addPendingRequest(
+                            id: request.id,
+                            continuation: continuation,
+                            type: M.Result.self
+                        )
+                    else { return }
 
                     // Send the request data
                     do {
@@ -445,7 +453,7 @@ public actor Client {
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
-        } else {
+        } else if unregisteredRequests.contains(requestID) {
             // Cancelled before `send` registered it: refused when it registers.
             cancelledRequests.insert(requestID)
         }
@@ -465,6 +473,7 @@ public actor Client {
     /// - Returns: The result of the request
     /// - Throws: MCPError if the client is not connected
     public func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        try Task.checkCancellation()
         let context = try send(request)
         // A caller that gives up, such as one with a deadline, cancels the request instead of
         // waiting on an answer that may never come.
@@ -475,18 +484,27 @@ public actor Client {
         }
     }
 
+    /// Marks a request as made but not yet registered, so a cancel before it registers holds.
+    fileprivate func noteUnregistered(_ id: ID) {
+        unregisteredRequests.insert(id)
+    }
+
+    /// Registers a request as pending, or refuses one cancelled before it got here.
+    @discardableResult
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type  // Keep type for AnyPendingRequest internal logic
-    ) {
+    ) -> Bool {
+        unregisteredRequests.remove(id)
         if cancelledRequests.remove(id) != nil {
             continuation.resume(throwing: CancellationError())
-            return
+            return false
         }
         pendingRequests[id] = AnyPendingRequest(
             PendingRequest(continuation: continuation)
         )
+        return true
     }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
@@ -514,6 +532,7 @@ public actor Client {
             M.Result, Swift.Error
         > {
             requests.append(try AnyRequest(request))
+            await client.noteUnregistered(request.id)
 
             // Return a Task that registers the pending request and awaits its result.
             // The continuation is resumed when the response arrives.
