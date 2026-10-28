@@ -9,6 +9,7 @@ var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
     .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+    .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
 ]
 
 // Target dependencies needed on all platforms
@@ -19,6 +20,12 @@ var targetDependencies: [Target.Dependency] = [
         name: "EventSource", package: "eventsource"),
     .product(
         name: "AsyncHTTPClient", package: "async-http-client",
+        condition: .when(platforms: [.linux])),
+    .product(
+        name: "NIOCore", package: "swift-nio",
+        condition: .when(platforms: [.linux])),
+    .product(
+        name: "NIOFoundationCompat", package: "swift-nio",
         condition: .when(platforms: [.linux])),
 ]
 

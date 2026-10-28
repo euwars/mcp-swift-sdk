@@ -20,10 +20,14 @@ struct AnyPendingRequest: Sendable {
                 if let typedValue = value as? T {
                     request.continuation.resume(returning: typedValue)
                 } else if let value = value as? Value,
-                    let data = try? JSONEncoder().encode(value),
-                    let decoded = try? JSONDecoder().decode(T.self, from: data)
+                    let data = try? JSONEncoder().encode(value)
                 {
-                    request.continuation.resume(returning: decoded)
+                    do {
+                        request.continuation.resume(returning: try JSONDecoder().decode(T.self, from: data))
+                    } catch {
+                        request.continuation.resume(
+                            throwing: MCPError.parseError("the answer does not read as \(T.self): \(error)"))
+                    }
                 } else {
                     request.continuation.resume(throwing: TypeMismatchError())
                 }

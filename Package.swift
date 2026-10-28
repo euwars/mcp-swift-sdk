@@ -44,6 +44,12 @@ let package = Package(
                 .product(
                     name: "AsyncHTTPClient", package: "async-http-client",
                     condition: .when(platforms: [.linux])),
+                .product(
+                    name: "NIOCore", package: "swift-nio",
+                    condition: .when(platforms: [.linux])),
+                .product(
+                    name: "NIOFoundationCompat", package: "swift-nio",
+                    condition: .when(platforms: [.linux])),
             ],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")

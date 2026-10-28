@@ -454,14 +454,20 @@ public actor Client {
 
     /// Send a request and receive its response immediately.
     ///
-    /// Internal convenience method for cases where cancellation tracking is not needed.
+    /// A caller's cancellation cancels the request, so a deadline around this call holds.
     ///
     /// - Parameter request: The request to send
     /// - Returns: The result of the request
     /// - Throws: MCPError if the client is not connected
-    func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
+    public func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
         let context = try send(request)
-        return try await context.value
+        // A caller that gives up, such as one with a deadline, cancels the request instead of
+        // waiting on an answer that may never come.
+        return try await withTaskCancellationHandler {
+            try await context.value
+        } onCancel: {
+            Task { try? await self.cancelRequest(context.requestID) }
+        }
     }
 
     private func addPendingRequest<T: Sendable & Decodable>(

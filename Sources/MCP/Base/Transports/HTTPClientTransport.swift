@@ -99,6 +99,8 @@ public actor HTTPClientTransport: Transport {
     /// The underlying URLSession task for the active GET SSE stream.
     /// Used to trigger reconnection when a POST SSE stream closes without delivering data.
     private var activeGETSessionTask: URLSessionDataTask?
+    /// Whether the server answered 404 to a request that carried this transport's session.
+    private var sessionExpired = false
 
     /// Creates a new HTTP transport client with the specified endpoint
     ///
@@ -244,6 +246,15 @@ public actor HTTPClientTransport: Transport {
 
         var attempts = 0
         let operationKey = jsonRPCOperationKey(from: data)
+
+        // A request sent after the server dropped the session would go without one and be
+        // refused for another reason, so it is told the session expired until a new one opens.
+        if sessionExpired {
+            guard operationKey == "initialize" else {
+                throw MCPError.internalError("Session expired")
+            }
+            sessionExpired = false
+        }
 
         while true {
             var request = URLRequest(url: endpoint)
@@ -423,6 +434,7 @@ public actor HTTPClientTransport: Transport {
             if sessionID != nil {
                 logger.warning("Session has expired")
                 sessionID = nil
+                sessionExpired = true
                 throw MCPError.internalError("Session expired")
             }
             throw MCPError.internalError("Endpoint not found")
